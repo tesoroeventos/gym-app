@@ -441,7 +441,8 @@ hr.d{border:none;border-top:1px solid var(--line);margin:20px 0}
         <div style="font-weight:700;font-size:16px;margin-bottom:6px">Respaldo</div>
         <p style="color:var(--muted);font-size:13px;line-height:1.5">Los datos viven en este teléfono. Exportá un JSON para no depender de él.</p>
       </div>
-      <button class="btn ghost mt" onclick="exportJSON()">Exportar JSON</button>
+      <button class="btn ghost mt" onclick="askName(false)">Cambiar nombre</button>
+      <button class="btn ghost" style="margin-top:8px" onclick="exportJSON()">Exportar JSON</button>
       <button class="btn ghost" style="margin-top:8px" onclick="document.getElementById('imp').click()">Importar JSON</button>
       <input type="file" id="imp" accept=".json" style="display:none" onchange="importJSON(this)">
       <hr class="d">
@@ -503,7 +504,8 @@ db.version(1).stores({
   routineEx: '++id, routineId, exerciseId, order',
   sessions:  '++id, date, routineId',
   sets:      '++id, sessionId, exerciseId',
-  body:      '++id, &date'
+  body:      '++id, &date',
+  settings:  '&key'
 });
 
 const SEED = [
@@ -568,7 +570,10 @@ function closeSheet(){
    ═══════════════════════════════════════════ */
 async function drawHome(){
   const h = new Date().getHours();
-  $('#greet').textContent = h<6?'Buenas noches, Matías' : h<13?'Buen día, Matías' : h<20?'Buenas tardes, Matías' : 'Buenas noches, Matías';
+  const rec = await db.settings.get('name');
+  const who = rec?.value;
+  const hi = h<6?'Buenas noches' : h<13?'Buen día' : h<20?'Buenas tardes' : 'Buenas noches';
+  $('#greet').textContent = who ? `${hi}, ${who}` : hi;
   $('#today-date').textContent = new Date().toLocaleDateString('es-AR',{weekday:'long',day:'numeric',month:'long'});
 
   RT = await db.routines.toArray();
@@ -991,7 +996,7 @@ async function drawHistory(){
    ═══════════════════════════════════════════ */
 async function exportJSON(){
   const dump = {v:1, exportedAt:new Date().toISOString()};
-  for(const t of ['exercises','routines','routineEx','sessions','sets','body']) dump[t] = await db[t].toArray();
+  for(const t of ['exercises','routines','routineEx','sessions','sets','body','settings']) dump[t] = await db[t].toArray();
   const url = URL.createObjectURL(new Blob([JSON.stringify(dump,null,2)],{type:'application/json'}));
   const a = document.createElement('a');
   a.href=url; a.download=`registro-${iso()}.json`; a.click();
@@ -1003,11 +1008,11 @@ async function importJSON(input){
   if(!confirm('Importar reemplaza todos los datos actuales. ¿Seguir?')) { input.value=''; return; }
   try{
     const d = JSON.parse(await f.text());
-    for(const t of ['exercises','routines','routineEx','sessions','sets','body']){
+    for(const t of ['exercises','routines','routineEx','sessions','sets','body','settings']){
       await db[t].clear();
       if(d[t]?.length) await db[t].bulkAdd(d[t]);
     }
-    toast('Importado'); drawHome(); go('home', document.querySelector('nav button[data-s=home]'));
+    toast('Importado'); await drawHome(); go('home', document.querySelector('nav button[data-s=home]'));
   }catch(e){ toast('Archivo inválido'); }
   input.value='';
 }
@@ -1018,6 +1023,31 @@ async function wipe(){
   for(const t of ['exercises','routines','routineEx','sessions','sets','body']) await db[t].clear();
   await seed(); drawHome(); go('home', document.querySelector('nav button[data-s=home]'));
   toast('Todo borrado');
+}
+
+/* ═══════════════════════════════════════════
+   NOMBRE
+   ═══════════════════════════════════════════ */
+async function askName(first){
+  const rec = await db.settings.get('name');
+  sheet(`
+    <h2>${first?'¿Cómo te llamás?':'Cambiar nombre'}</h2>
+    <div class="field">
+      <label>Nombre</label>
+      <input id="f-name" value="${esc(rec?.value||'')}" placeholder="Tu nombre" autocomplete="given-name">
+    </div>
+    <button class="btn primary" onclick="saveName()">${first?'Empezar':'Guardar'}</button>
+  `);
+  if(first) $('#bg').onclick = null;
+  setTimeout(()=>$('#f-name').focus(),300);
+}
+
+async function saveName(){
+  const v = $('#f-name').value.trim();
+  if(!v) return toast('Escribí tu nombre');
+  await db.settings.put({key:'name', value:v});
+  $('#bg').onclick = closeSheet;
+  closeSheet(); drawHome(); toast(`Hola, ${v}`);
 }
 
 /* ═══════════════════════════════════════════
@@ -1032,7 +1062,8 @@ async function seed(){
   await db.open();
   await seed();
   EX = await db.exercises.toArray();
-  drawHome();
+  await drawHome();
+  if(!(await db.settings.get('name'))) setTimeout(()=>askName(true), 450);
 })();
 
 // keep the workout from being lost on accidental back/refresh
