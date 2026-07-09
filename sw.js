@@ -1,4 +1,4 @@
-const CACHE = 'registro-v2';
+const CACHE = 'registro-v3';
 
 const CORE = [
   './',
