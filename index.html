@@ -218,6 +218,20 @@ nav.hide{transform:translateY(110%);transition:transform .2s}
 @keyframes pop{0%{transform:scale(1)}45%{transform:scale(1.18)}100%{transform:scale(1)}}
 .set-ok.pop{animation:pop .28s cubic-bezier(.34,1.56,.64,1)}
 
+/* cronometro inline para ejercicios por tiempo */
+.tw{position:relative}
+.tw input{width:100%}
+.hold{
+  position:absolute;right:5px;top:50%;transform:translateY(-50%);
+  width:30px;height:30px;border-radius:8px;background:var(--bg);
+  color:var(--muted);font-size:10px;line-height:1;
+  display:flex;align-items:center;justify-content:center;
+  border:1px solid var(--line);
+}
+.hold:active{transform:translateY(-50%) scale(.9)}
+.hold.run{background:var(--accent);color:#0A0A0B;border-color:var(--accent)}
+.set.done .hold{display:none}
+
 .ex-add{
   width:100%;padding:14px;color:var(--muted);font-size:13px;font-weight:600;
   border-top:1px solid var(--line);margin-top:8px;
@@ -441,6 +455,18 @@ hr.d{border:none;border-top:1px solid var(--line);margin:20px 0}
         <div style="font-weight:700;font-size:16px;margin-bottom:6px">Respaldo</div>
         <p style="color:var(--muted);font-size:13px;line-height:1.5">Los datos viven en este teléfono. Exportá un JSON para no depender de él.</p>
       </div>
+      <div class="card mt">
+        <div style="font-weight:700;font-size:16px;margin-bottom:6px">Descanso</div>
+        <p style="color:var(--muted);font-size:13px;line-height:1.5;margin-bottom:14px">Cuánto arranca el temporizador al completar una serie.</p>
+        <div class="seg" style="margin:0">
+          <button id="rd-60"  onclick="setRest(60)">60s</button>
+          <button id="rd-90"  onclick="setRest(90)">90s</button>
+          <button id="rd-120" onclick="setRest(120)">2 min</button>
+          <button id="rd-180" onclick="setRest(180)">3 min</button>
+        </div>
+      </div>
+      <button class="btn ghost mt" onclick="askNotif()">Activar notificaciones</button>
+      <p style="color:var(--muted);font-size:12px;line-height:1.5;margin-top:10px">Para que te avise cuando termina el descanso aunque salgas de la app.</p>
       <button class="btn ghost mt" onclick="askName(false)">Cambiar nombre</button>
       <button class="btn ghost" style="margin-top:8px" onclick="exportJSON()">Exportar JSON</button>
       <button class="btn ghost" style="margin-top:8px" onclick="document.getElementById('imp').click()">Importar JSON</button>
@@ -508,6 +534,17 @@ db.version(1).stores({
   settings:  '&key'
 });
 
+/* v2: campo `mode` en ejercicios (reps | time).
+   Los que ya existen quedan en 'reps' salvo los isometricos conocidos. */
+db.version(2).stores({}).upgrade(async tx => {
+  const ISO = ['plancha','hollow','isometri','hold','caminata del granjero','farmer','wall sit','silla'];
+  await tx.table('exercises').toCollection().modify(e => {
+    if(e.mode) return;
+    const n = (e.name||'').toLowerCase();
+    e.mode = ISO.some(k => n.includes(k)) ? 'time' : 'reps';
+  });
+});
+
 const SEED = [
   ['Press banca','Pecho'],['Press inclinado mancuernas','Pecho'],['Aperturas en polea','Pecho'],
   ['Fondos','Pecho'],['Dominadas','Espalda'],['Remo con barra','Espalda'],
@@ -516,7 +553,8 @@ const SEED = [
   ['Curl femoral','Piernas'],['Hip thrust','Piernas'],['Elevación de gemelos','Piernas'],
   ['Press militar','Hombros'],['Elevaciones laterales','Hombros'],['Pájaros','Hombros'],
   ['Curl con barra','Brazos'],['Curl martillo','Brazos'],['Extensión en polea','Brazos'],
-  ['Press francés','Brazos'],['Plancha','Core'],['Rueda abdominal','Core']
+  ['Press francés','Brazos'],['Plancha','Core','time'],['Rueda abdominal','Core'],
+  ['Plancha lateral','Core','time'],['Hollow hold','Core','time'],['Caminata del granjero','Core','time']
 ];
 const MUSCLES = ['Pecho','Espalda','Piernas','Hombros','Brazos','Core','Otro'];
 
@@ -524,6 +562,7 @@ const MUSCLES = ['Pecho','Espalda','Piernas','Hombros','Brazos','Core','Otro'];
    STATE
    ═══════════════════════════════════════════ */
 let EX = [], RT = [], W = null, tick = null, rest = null;
+let REST_DEFAULT = 90;
 
 /* ═══════════════════════════════════════════
    UTIL
@@ -533,6 +572,9 @@ const iso = d => { const x = d||new Date(); return `${x.getFullYear()}-${String(
 const esc = s => (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clock = s => `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
 const buzz = ms => navigator.vibrate && navigator.vibrate(ms);
+// los ejercicios por tiempo no suman volumen: 10kg x 45s no son 450kg
+const volOf = sets => sets.filter(s=>!s.warm && s.mode!=='time')
+                          .reduce((a,s)=>a+(s.weight||0)*(s.reps||0),0);
 
 let tt;
 function toast(m){
@@ -600,7 +642,7 @@ async function drawHome(){
   const ids = ss.map(s=>s.id);
   const all = await db.sets.toArray();
   const ms = all.filter(x=>ids.includes(x.sessionId) && x.done && !x.warm);
-  const vol = ms.reduce((a,x)=>a+(x.weight||0)*(x.reps||0),0);
+  const vol = volOf(ms);
 
   $('#st-1').textContent = ss.length;
   $('#st-2').textContent = ms.length;
@@ -656,23 +698,42 @@ async function drawExercises(){
 $('#ex-search').oninput = drawExercises;
 
 async function openExercise(id){
-  const e = id ? await db.exercises.get(id) : {name:'',muscle:'Pecho',note:''};
+  const e = id ? await db.exercises.get(id) : {name:'',muscle:'Pecho',note:'',mode:'reps'};
+  const md = e.mode||'reps';
   sheet(`
     <h2>${id?'Editar ejercicio':'Nuevo ejercicio'}</h2>
     <div class="field"><label>Nombre</label><input id="f-n" value="${esc(e.name)}" placeholder="Press banca"></div>
     <div class="field"><label>Grupo muscular</label>
       <select id="f-m">${MUSCLES.map(m=>`<option ${m===e.muscle?'selected':''}>${m}</option>`).join('')}</select></div>
+    <div class="field"><label>Cómo se mide</label>
+      <div class="seg" style="margin:0">
+        <button type="button" id="md-reps" class="${md==='reps'?'on':''}" onclick="pickMode('reps')">Repeticiones</button>
+        <button type="button" id="md-time" class="${md==='time'?'on':''}" onclick="pickMode('time')">Tiempo</button>
+      </div>
+      <div style="color:var(--muted);font-size:12px;margin-top:8px;line-height:1.45" id="md-hint"></div>
+    </div>
     <div class="field"><label>Notas</label><textarea id="f-note" placeholder="Agarre, altura del banco, lo que necesites recordar">${esc(e.note||'')}</textarea></div>
     <button class="btn primary" onclick="saveExercise(${id||0})">Guardar</button>
     ${id?`<button class="btn danger mt" onclick="delExercise(${id})">Eliminar</button>`:''}
   `);
+  FMODE = md; pickMode(md);
   setTimeout(()=>!id && $('#f-n').focus(),300);
+}
+
+let FMODE='reps';
+function pickMode(m){
+  FMODE = m;
+  $('#md-reps').classList.toggle('on', m==='reps');
+  $('#md-time').classList.toggle('on', m==='time');
+  $('#md-hint').textContent = m==='time'
+    ? 'Para plancha, hollow hold, isométricos. Se registra en segundos y podés cronometrar en vivo.'
+    : 'Para todo lo que se cuenta por series y repeticiones.';
 }
 
 async function saveExercise(id){
   const name = $('#f-n').value.trim();
   if(!name) return toast('Falta el nombre');
-  const rec = {name, muscle:$('#f-m').value, note:$('#f-note').value.trim()};
+  const rec = {name, muscle:$('#f-m').value, mode:FMODE, note:$('#f-note').value.trim()};
   id ? await db.exercises.update(id,rec) : await db.exercises.add(rec);
   closeSheet(); drawExercises(); toast(id?'Guardado':'Ejercicio creado');
 }
@@ -761,10 +822,15 @@ async function lastPerformance(exerciseId){
   if(!done.length) return null;
   const lastSession = Math.max(...done.map(s=>s.sessionId));
   const g = done.filter(s=>s.sessionId===lastSession);
-  return { sets:g, best:Math.max(...done.map(s=>s.weight||0)) };
+  return {
+    sets: g,
+    best: Math.max(...done.map(s=>s.weight||0)),
+    bestTime: Math.max(...done.map(s=>s.reps||0))
+  };
 }
 
 async function startWorkout(routineId){
+  unlockAudio();
   const r = await db.routines.get(routineId);
   const links = await db.routineEx.where('routineId').equals(routineId).sortBy('order');
   EX = await db.exercises.toArray();
@@ -778,7 +844,7 @@ async function startWorkout(routineId){
     const sets = prev
       ? prev.sets.map(s=>({weight:s.weight, reps:s.reps, done:false, warm:false}))
       : [{weight:'',reps:'',done:false,warm:false},{weight:'',reps:'',done:false,warm:false},{weight:'',reps:'',done:false,warm:false}];
-    W.ex.push({id:e.id, name:e.name, prev, sets});
+    W.ex.push({id:e.id, name:e.name, mode:e.mode||'reps', prev, sets});
   }
 
   $('#w-title').textContent = r.name;
@@ -795,20 +861,26 @@ async function startWorkout(routineId){
 
 function renderWorkout(){
   $('#w-body').innerHTML = W.ex.map((e,i)=>{
+    const T = e.mode==='time';
     const p = e.prev
-      ? 'Última vez  ' + e.prev.sets.map(s=>`${s.weight}×${s.reps}`).join('  ')
+      ? 'Última vez  ' + e.prev.sets.map(s=> T
+          ? (s.weight ? `${s.weight}kg·${s.reps}s` : `${s.reps}s`)
+          : `${s.weight}×${s.reps}`).join('  ')
       : 'Primera vez con este ejercicio';
     return `<div class="ex">
       <div class="ex-h">
         <div class="grow"><div class="ex-name">${esc(e.name)}</div><div class="ex-last">${esc(p)}</div></div>
         <button class="ex-menu" onclick="dropEx(${i})">✕</button>
       </div>
-      <div class="set-hd"><span></span><span>Kg</span><span>Reps</span><span></span></div>
+      <div class="set-hd"><span></span><span>Kg</span><span>${T?'Seg':'Reps'}</span><span></span></div>
       ${e.sets.map((s,j)=>`
         <div class="set ${s.done?'done':''} ${s.warm?'warm':''}" id="s${i}-${j}">
           <button class="set-n" onclick="toggleWarm(${i},${j})">${s.warm?'W':j+1-e.sets.slice(0,j).filter(x=>x.warm).length}</button>
-          <input type="number" inputmode="decimal" step="0.5" value="${s.weight}" placeholder="${e.prev?.sets[j]?.weight ?? '—'}" onchange="setVal(${i},${j},'weight',this.value)">
-          <input type="number" inputmode="numeric" value="${s.reps}" placeholder="${e.prev?.sets[j]?.reps ?? '—'}" onchange="setVal(${i},${j},'reps',this.value)">
+          <input type="number" inputmode="decimal" step="0.5" value="${s.weight}" placeholder="${e.prev?.sets[j]?.weight ?? (T?'0':'—')}" onchange="setVal(${i},${j},'weight',this.value)">
+          <div class="tw">
+            <input type="number" inputmode="numeric" value="${s.reps}" placeholder="${e.prev?.sets[j]?.reps ?? '—'}" onchange="setVal(${i},${j},'reps',this.value)">
+            ${T?`<button class="hold" onclick="holdStart(${i},${j})" title="Cronometrar">▶</button>`:''}
+          </div>
           <button class="set-ok" onclick="tickSet(${i},${j},this)">
             <svg viewBox="0 0 24 24"><path d="M4 12.5l5.5 5.5L20 6.5"/></svg></button>
         </div>`).join('')}
@@ -818,6 +890,43 @@ function renderWorkout(){
 }
 
 function setVal(i,j,k,v){ W.ex[i].sets[j][k] = v===''?'':+v; }
+
+/* ── cronometro de isometricos ─────────────────────────────
+   Cuenta hacia arriba mientras aguantas la posicion.
+   Timestamp absoluto: si sales de la app y volves, el numero
+   sigue siendo correcto. */
+let hold = null;
+function holdStart(i,j){
+  unlockAudio();
+  const row = $(`#s${i}-${j}`);
+  const btn = row.querySelector('.hold');
+  const inp = row.querySelectorAll('input')[1];
+
+  if(hold && hold.i===i && hold.j===j){   // parar
+    const secs = Math.round((Date.now()-hold.t0)/1000);
+    clearInterval(hold.iv); hold=null;
+    btn.classList.remove('run'); btn.textContent='▶';
+    W.ex[i].sets[j].reps = secs;
+    inp.value = secs;
+    beep(880,.12,.25); buzz(30);
+    return;
+  }
+  if(hold){                                // ya corria otro
+    clearInterval(hold.iv);
+    const p = $(`#s${hold.i}-${hold.j}`)?.querySelector('.hold');
+    if(p){ p.classList.remove('run'); p.textContent='▶'; }
+  }
+  hold = {i, j, t0:Date.now(), iv:null};
+  btn.classList.add('run'); btn.textContent='■';
+  buzz(20);
+  hold.iv = setInterval(()=>{
+    const s = Math.round((Date.now()-hold.t0)/1000);
+    inp.value = s;
+  }, 200);
+}
+function holdCancel(){
+  if(hold){ clearInterval(hold.iv); hold=null; }
+}
 function addSet(i){
   const last = W.ex[i].sets.filter(s=>!s.warm).slice(-1)[0];
   W.ex[i].sets.push({weight:last?.weight??'', reps:last?.reps??'', done:false, warm:false});
@@ -827,17 +936,36 @@ function dropEx(i){ if(confirm('¿Quitar del entrenamiento?')){ W.ex.splice(i,1)
 function toggleWarm(i,j){ W.ex[i].sets[j].warm = !W.ex[i].sets[j].warm; renderWorkout(); }
 
 function tickSet(i,j,btn){
-  const s = W.ex[i].sets[j];
+  unlockAudio();
+  const ex  = W.ex[i];
+  const T   = ex.mode==='time';
+  const s   = ex.sets[j];
   const row = $(`#s${i}-${j}`);
   const wIn = row.querySelectorAll('input')[0];
   const rIn = row.querySelectorAll('input')[1];
 
   if(!s.done){
-    // adopt placeholder values if the person left them untouched
-    if(s.weight==='' && wIn.placeholder!=='—') s.weight = +wIn.placeholder;
-    if(s.reps==='' && rIn.placeholder!=='—') s.reps = +rIn.placeholder;
-    if(s.reps===''){ toast('Falta las reps'); rIn.focus(); return; }
-    wIn.value=s.weight; rIn.value=s.reps;
+    // si el cronometro esta corriendo en esta serie, pararlo y tomar el valor
+    if(hold && hold.i===i && hold.j===j) holdStart(i,j);
+
+    // leer del input directo: onchange no dispara si nunca perdio el foco
+    if(wIn.value!=='') s.weight = +wIn.value;
+    if(rIn.value!=='') s.reps   = +rIn.value;
+
+    // si quedo vacio, adoptar el placeholder (la ultima vez)
+    if(s.weight==='' && wIn.placeholder!=='—' && wIn.placeholder!=='') s.weight = +wIn.placeholder;
+    if(s.reps===''   && rIn.placeholder!=='—') s.reps = +rIn.placeholder;
+
+    // peso corporal: kg vacio es valido
+    if(s.weight==='') s.weight = 0;
+
+    if(s.reps==='' || isNaN(s.reps)){
+      toast(T ? 'Falta el tiempo' : 'Faltan las reps');
+      rIn.focus(); return;
+    }
+
+    wIn.value = s.weight || (T?'':'0');
+    rIn.value = s.reps;
 
     s.done = true;
     row.classList.add('done');
@@ -845,11 +973,15 @@ function tickSet(i,j,btn){
     setTimeout(()=>btn.classList.remove('pop'),300);
     buzz(28);
 
-    // PR check
-    if(!s.warm && W.ex[i].prev && s.weight > W.ex[i].prev.best){
-      toast(`Récord · ${s.weight} kg`); buzz([30,60,30]);
+    // record: por peso en reps, por segundos en tiempo
+    if(!s.warm && ex.prev){
+      if(T && s.reps > (ex.prev.bestTime||0)){
+        toast(`Récord · ${s.reps}s`); buzz([30,60,30]); beep(1180,.2,.3);
+      } else if(!T && s.weight > (ex.prev.best||0)){
+        toast(`Récord · ${s.weight} kg`); buzz([30,60,30]); beep(1180,.2,.3);
+      }
     }
-    if(!s.warm) restStart(90);
+    if(!s.warm) restStart(REST_DEFAULT);
   } else {
     s.done = false;
     row.classList.remove('done');
@@ -871,7 +1003,7 @@ async function addExToWorkout(){
 async function pushEx(id){
   const e = EX.find(x=>x.id===id);
   const prev = await lastPerformance(id);
-  W.ex.push({id, name:e.name, prev,
+  W.ex.push({id, name:e.name, mode:e.mode||'reps', prev,
     sets: prev ? prev.sets.map(s=>({weight:s.weight,reps:s.reps,done:false,warm:false}))
                : [{weight:'',reps:'',done:false,warm:false},{weight:'',reps:'',done:false,warm:false},{weight:'',reps:'',done:false,warm:false}]});
   closeSheet(); renderWorkout();
@@ -883,44 +1015,164 @@ function askAbort(){
   endWorkout();
 }
 function endWorkout(){
-  clearInterval(tick); restStop(); W=null;
+  clearInterval(tick); restStop(); holdCancel(); W=null;
   $('#nav').classList.remove('hide');
   go('home', document.querySelector('nav button[data-s=home]'));
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on', b.dataset.s==='home'));
 }
 
 async function finishWorkout(){
-  const done = W.ex.flatMap(e=>e.sets.filter(s=>s.done).map(s=>({...s, exerciseId:e.id})));
+  holdCancel();
+  const done = W.ex.flatMap(e=>e.sets.filter(s=>s.done).map(s=>({...s, exerciseId:e.id, mode:e.mode||'reps'})));
   if(!done.length){ if(!confirm('No completaste ninguna serie. ¿Salir igual?')) return; return endWorkout(); }
 
   const dur = Math.floor((Date.now()-W.start)/1000);
   const sessionId = await db.sessions.add({date:iso(), routineId:W.routineId, name:W.name, duration:dur});
-  await db.sets.bulkAdd(done.map(s=>({sessionId, exerciseId:s.exerciseId, weight:s.weight||0, reps:s.reps||0, done:1, warm:s.warm?1:0})));
+  await db.sets.bulkAdd(done.map(s=>({
+    sessionId, exerciseId:s.exerciseId,
+    weight:s.weight||0, reps:s.reps||0,
+    mode:s.mode, done:1, warm:s.warm?1:0
+  })));
 
-  const vol = done.filter(s=>!s.warm).reduce((a,s)=>a+(s.weight||0)*(s.reps||0),0);
+  const eff  = done.filter(s=>!s.warm);
+  const vol  = eff.filter(s=>s.mode!=='time').reduce((a,s)=>a+(s.weight||0)*(s.reps||0),0);
+  const secs = eff.filter(s=>s.mode==='time').reduce((a,s)=>a+(s.reps||0),0);
   endWorkout();
-  toast(`${clock(dur)} · ${Math.round(vol)} kg movidos`);
+  const parts = [clock(dur)];
+  if(vol)  parts.push(`${Math.round(vol)} kg movidos`);
+  if(secs) parts.push(`${secs}s de isométricos`);
+  toast(parts.join(' · '));
 }
 
 /* ═══════════════════════════════════════════
    REST TIMER
    ═══════════════════════════════════════════ */
-let restLeft=0, restTotal=0;
+/* Timestamp absoluto: sobrevive a que iOS congele la pestaña.
+   Al volver de background, el numero ya esta bien sin importar
+   cuantos ticks se perdieron. */
+let restEnd=0, restTotal=0, beeped=new Set(), restNotif=null;
+
 function restStart(sec){
-  restLeft=sec; restTotal=sec;
+  restTotal = sec;
+  restEnd   = Date.now() + sec*1000;
+  beeped.clear();
   $('#rest').classList.add('up');
-  paintRest(); clearInterval(rest);
-  rest = setInterval(()=>{
-    restLeft--; paintRest();
-    if(restLeft<=0){ clearInterval(rest); buzz([60,80,60]); setTimeout(restStop,600); }
-  },1000);
+  clearInterval(rest);
+  paintRest();
+  rest = setInterval(paintRest, 250);
+  scheduleNotif(sec);
 }
+
 function paintRest(){
-  $('#rest-t').textContent = clock(Math.max(restLeft,0));
-  $('#rest-fill').style.width = Math.max(restLeft/restTotal*100,0)+'%';
+  const left = Math.max(Math.round((restEnd - Date.now())/1000), 0);
+  $('#rest-t').textContent = clock(left);
+  $('#rest-fill').style.width = Math.max((restEnd-Date.now())/(restTotal*1000)*100, 0)+'%';
+
+  // cuenta regresiva: un pitido corto en 5,4,3,2,1
+  if(left<=5 && left>0 && !beeped.has(left)){
+    beeped.add(left);
+    beep(880, .07, .22);
+  }
+  if(left===0 && !beeped.has(0)){
+    beeped.add(0);
+    beep(1320, .45, .38);   // pitido final, mas largo y agudo
+    buzz([80,70,80,70,140]);
+    clearInterval(rest);
+    setTimeout(restStop, 900);
+  }
 }
-function restAdd(s){ restLeft+=s; restTotal=Math.max(restTotal,restLeft); paintRest(); }
-function restStop(){ clearInterval(rest); $('#rest').classList.remove('up'); }
+
+function restAdd(s){
+  restEnd += s*1000;
+  restTotal = Math.max(restTotal, Math.round((restEnd-Date.now())/1000));
+  beeped.clear();
+  paintRest();
+  scheduleNotif(Math.round((restEnd-Date.now())/1000));
+}
+
+function restStop(){
+  clearInterval(rest);
+  restEnd = 0;
+  $('#rest').classList.remove('up');
+  if(restNotif){ clearTimeout(restNotif); restNotif=null; }
+}
+
+/* ── audio ────────────────────────────────────────────────
+   Un solo AudioContext, desbloqueado en el primer toque.
+   iOS no deja crear sonido sin gesto previo del usuario. */
+let AC = null;
+function unlockAudio(){
+  if(AC) return;
+  try{
+    AC = new (window.AudioContext||window.webkitAudioContext)();
+    // buffer mudo: destraba el contexto en iOS
+    const b = AC.createBuffer(1,1,22050);
+    const s = AC.createBufferSource();
+    s.buffer=b; s.connect(AC.destination); s.start(0);
+  }catch(e){}
+}
+function beep(freq, dur, vol){
+  if(!AC) return;
+  if(AC.state==='suspended') AC.resume();
+  try{
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type='sine'; o.frequency.value=freq;
+    o.connect(g); g.connect(AC.destination);
+    const t = AC.currentTime;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(vol, t+.01);
+    g.gain.exponentialRampToValueAtTime(.0001, t+dur);
+    o.start(t); o.stop(t+dur+.02);
+  }catch(e){}
+}
+
+/* ── notificacion ─────────────────────────────────────────
+   Con la app en background iOS no ejecuta JS, asi que el
+   beep no suena. Una notificacion local si avisa. */
+function scheduleNotif(sec){
+  if(restNotif) clearTimeout(restNotif);
+  if(!('Notification' in window) || Notification.permission!=='granted') return;
+  restNotif = setTimeout(()=>{
+    if(document.hidden){
+      try{ new Notification('Descanso terminado', {body:'Dale a la próxima serie', tag:'rest', icon:'icon-192.png'}); }catch(e){}
+    }
+  }, sec*1000);
+}
+
+async function setRest(s){
+  REST_DEFAULT = s;
+  await db.settings.put({key:'rest', value:s});
+  paintRestPref();
+  toast(`Descanso: ${s<60?s+'s':(s/60)+' min'}`);
+}
+function paintRestPref(){
+  [60,90,120,180].forEach(v=>{
+    const b = $('#rd-'+v);
+    if(b) b.classList.toggle('on', v===REST_DEFAULT);
+  });
+}
+
+async function askNotif(){
+  if(!('Notification' in window)) return toast('Este navegador no soporta notificaciones');
+  if(Notification.permission==='granted') return toast('Ya están activadas');
+  if(Notification.permission==='denied') return toast('Están bloqueadas en los ajustes del navegador');
+  const p = await Notification.requestPermission();
+  toast(p==='granted' ? 'Notificaciones activadas' : 'Sin notificaciones');
+}
+
+/* al volver de background: si el descanso ya vencio mientras
+   estabas afuera, cerrarlo callado en vez de pitar tarde. */
+document.addEventListener('visibilitychange', ()=>{
+  if(document.hidden || !restEnd) return;
+  if(Date.now() >= restEnd){
+    beeped.add(0);          // no sonar retroactivo
+    clearInterval(rest);
+    $('#rest-t').textContent = '0:00';
+    restStop();
+  } else {
+    paintRest();
+  }
+});
 
 /* ═══════════════════════════════════════════
    PROGRESS
@@ -931,6 +1183,7 @@ function tab(t,el){
   ['body','hist','data'].forEach(x=>$('#t-'+x).style.display = x===t?'block':'none');
   if(t==='body') drawBody();
   if(t==='hist') drawHistory();
+  if(t==='data') paintRestPref();
 }
 
 async function drawBody(){
@@ -981,7 +1234,7 @@ async function drawHistory(){
   const all = await db.sets.toArray();
   $('#hist-list').innerHTML = ss.map(s=>{
     const g = all.filter(x=>x.sessionId===s.id && !x.warm);
-    const vol = g.reduce((a,x)=>a+x.weight*x.reps,0);
+    const vol = volOf(g);
     const d = new Date(s.date+'T12:00');
     return `<div class="row" style="cursor:default">
       <div class="grow">
@@ -1055,12 +1308,14 @@ async function saveName(){
    ═══════════════════════════════════════════ */
 async function seed(){
   if(await db.exercises.count()) return;
-  await db.exercises.bulkAdd(SEED.map(([name,muscle])=>({name,muscle,note:''})));
+  await db.exercises.bulkAdd(SEED.map(([name,muscle,mode])=>({name,muscle,mode:mode||'reps',note:''})));
 }
 
 (async()=>{
   await db.open();
   await seed();
+  const rp = await db.settings.get('rest');
+  if(rp?.value) REST_DEFAULT = rp.value;
   EX = await db.exercises.toArray();
   await drawHome();
   if(!(await db.settings.get('name'))) setTimeout(()=>askName(true), 450);
