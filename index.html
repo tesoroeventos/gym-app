@@ -316,6 +316,22 @@ nav.hide{transform:translateY(110%);transition:transform .2s}
 .pick.sel .box{background:var(--accent);border-color:var(--accent)}
 .pick.sel .box::after{content:'';width:9px;height:5px;border-left:2px solid #0A0A0B;border-bottom:2px solid #0A0A0B;transform:rotate(-45deg) translate(1px,-1px)}
 
+/* chips de seleccion multiple del generador */
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{
+  padding:11px 15px;border-radius:11px;background:var(--surface-2);
+  border:1px solid var(--line);font-size:14px;font-weight:600;
+  transition:background .14s,border-color .14s,color .14s;
+}
+.chip.on{background:var(--accent);border-color:var(--accent);color:#0A0A0B}
+.chip:active{transform:scale(.96)}
+.swap{
+  width:38px;height:38px;border-radius:11px;background:var(--surface-2);
+  border:1px solid var(--line);color:var(--muted);font-size:17px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+}
+.swap:active{transform:scale(.9);color:var(--text)}
+
 .tag{
   display:inline-block;padding:5px 10px;background:var(--surface-2);
   border-radius:7px;font-size:10px;font-weight:700;letter-spacing:.07em;
@@ -407,6 +423,11 @@ hr.d{border:none;border-top:1px solid var(--line);margin:20px 0}
 <!-- ══════════ RUTINAS ══════════ -->
 <section id="s-routines" class="screen">
   <div class="head"><h1>Rutinas</h1><div class="sub" id="rt-count"></div></div>
+  <div class="pad" style="margin-bottom:14px">
+    <button class="btn ghost" onclick="openGen()">
+      <span style="font-size:16px">✦</span> Armar rutina por mí
+    </button>
+  </div>
   <div class="pad" id="rt-list"></div>
   <button class="fab" onclick="openRoutine()">+</button>
 </section>
@@ -557,6 +578,62 @@ const SEED = [
   ['Plancha lateral','Core','time'],['Hollow hold','Core','time'],['Caminata del granjero','Core','time']
 ];
 const MUSCLES = ['Pecho','Espalda','Piernas','Hombros','Brazos','Core','Otro'];
+
+/* ═══════════════════════════════════════════
+   GENERADOR DE RUTINAS
+   Reglas locales, sin internet. Clasifica por
+   nombre para no obligarte a reetiquetar nada.
+   ═══════════════════════════════════════════ */
+
+// compuestos: multiarticulares, van primero cuando estas fresco
+const COMPOUND = [
+  'sentadilla','squat','peso muerto','deadlift','press banca','press inclinado',
+  'press militar','press de hombro','dominada','pull up','remo','row','fondos','dip',
+  'prensa','hip thrust','zancada','lunge','desplante','jalón','jalon','pull down',
+  'clean','arranque','snatch','empuje de cadera','búlgara','bulgara','peso muerto rumano'
+];
+
+// patron de movimiento: para no repetir el mismo estimulo
+/* El orden importa: la primera regla que matchea gana.
+   Las tracciones verticales van antes que empuje-horizontal
+   porque "jalón al pecho" contiene la palabra pecho. */
+const PATTERN = [
+  [['dominada','pull up','pull-up','jalon','pull down','pulldown','pullover','remo alto'], 'traccion-vertical'],
+  [['remo','row','face pull','pajaro','peck deck','pec deck'],             'traccion-horizontal'],
+  [['press militar','press de hombro','press hombro','elevacion lateral','elevaciones lateral','elevacion frontal','elevaciones frontal','arnold','press arnold'], 'empuje-vertical'],
+  [['press banca','press inclinado','press plano','press declinado','apertura','cruce','fondo','dip','contractor'], 'empuje-horizontal'],
+  [['peso muerto','deadlift','femoral','hip thrust','gluteo','buenos dias','rumano','good morning'], 'cadera'],
+  [['sentadilla','squat','prensa','zancada','lunge','desplante','extension de cuad','bulgara','step up','sissy'], 'rodilla'],
+  [['gemelo','pantorrilla','calf','soleo'],                                'pantorrilla'],
+  [['curl'],                                                                'biceps'],
+  [['extension en polea','press frances','copa','triceps','patada','rompecraneo','skull'], 'triceps'],
+  [['plancha','hollow','abdominal','rueda','crunch','elevacion de piernas','oblicuo','russian','ab wheel'], 'core']
+];
+
+const norm = s => (s||'').toLowerCase()
+  .normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+
+function isCompound(name){
+  const n = norm(name);
+  return COMPOUND.some(k => n.includes(norm(k)));
+}
+function patternOf(name){
+  const n = norm(name);
+  for(const [keys,p] of PATTERN){
+    if(keys.some(k => n.includes(k))) return p;   // keys ya sin acento
+  }
+  return 'otro';
+}
+
+/* Series y reps sugeridas segun objetivo y tipo de ejercicio */
+function prescribe(goal, compound, mode){
+  if(mode === 'time') return {sets:3, hint:'3 × 30-45s'};
+  if(goal === 'fuerza')
+    return compound ? {sets:4, hint:'4 × 4-6'}  : {sets:3, hint:'3 × 8-10'};
+  if(goal === 'resistencia')
+    return compound ? {sets:3, hint:'3 × 15-20'}: {sets:3, hint:'3 × 15-20'};
+  return compound   ? {sets:4, hint:'4 × 6-10'} : {sets:3, hint:'3 × 10-12'};
+}
 
 /* ═══════════════════════════════════════════
    STATE
@@ -746,13 +823,98 @@ async function delExercise(id){
 }
 
 /* ═══════════════════════════════════════════
+   GENERADOR
+   ═══════════════════════════════════════════ */
+
+/* Reparte `total` ejercicios entre los grupos pedidos.
+   Los grupos grandes (piernas, espalda, pecho) reciben mas. */
+function shareOut(groups, total){
+  const BIG = {Piernas:3, Espalda:3, Pecho:2.5, Hombros:1.5, Brazos:1.5, Core:1, Otro:1};
+  const w = groups.map(g => BIG[g] ?? 1);
+  const sum = w.reduce((a,b)=>a+b, 0);
+  const out = groups.map((g,i) => ({g, n: Math.max(1, Math.round(total * w[i]/sum))}));
+  // ajustar por redondeo
+  let diff = total - out.reduce((a,x)=>a+x.n, 0);
+  let k = 0;
+  while(diff !== 0 && k < 60){
+    const idx = diff > 0
+      ? out.indexOf(out.reduce((a,b)=> (BIG[b.g]??1) > (BIG[a.g]??1) ? b : a))
+      : out.indexOf(out.reduce((a,b)=> b.n > a.n ? b : a));
+    out[idx].n += diff > 0 ? 1 : -1;
+    if(out[idx].n < 1){ out[idx].n = 1; }
+    diff = total - out.reduce((a,x)=>a+x.n, 0);
+    k++;
+  }
+  return out;
+}
+
+function pickExercises(pool, groups, total, goal){
+  const chosen = [];
+  const usedPat = {};
+  const usedId  = new Set();
+
+  for(const {g, n} of shareOut(groups, total)){
+    let cand = pool.filter(e => e.muscle === g && !usedId.has(e.id));
+    if(!cand.length) continue;
+
+    // compuestos primero, y dentro de cada tipo al azar
+    const comp = cand.filter(e =>  isCompound(e.name)).sort(()=>Math.random()-.5);
+    const isol = cand.filter(e => !isCompound(e.name)).sort(()=>Math.random()-.5);
+
+    // en fuerza pesan mas los compuestos; en resistencia, mas variedad
+    const order = goal === 'fuerza' ? [...comp, ...isol]
+                : goal === 'resistencia' ? [...comp.slice(0,1), ...isol, ...comp.slice(1)]
+                : [...comp.slice(0,2), ...isol, ...comp.slice(2)];
+
+    // en Brazos alternar biceps/triceps para no cargar siempre lo mismo
+    let seq = order;
+    if(g === 'Brazos'){
+      const bi = order.filter(e=>patternOf(e.name)==='biceps');
+      const tr = order.filter(e=>patternOf(e.name)==='triceps');
+      const ot = order.filter(e=>!['biceps','triceps'].includes(patternOf(e.name)));
+      const first = Math.random() < .5 ? [bi,tr] : [tr,bi];
+      seq = [];
+      for(let k=0;k<Math.max(first[0].length,first[1].length);k++){
+        if(first[0][k]) seq.push(first[0][k]);
+        if(first[1][k]) seq.push(first[1][k]);
+      }
+      seq = [...seq, ...ot];
+    }
+
+    let added = 0;
+    // primera pasada: evitando repetir patron
+    for(const e of seq){
+      if(added >= n) break;
+      const p = patternOf(e.name);
+      if((usedPat[p]||0) >= 1 && p !== 'otro') continue;
+      chosen.push(e); usedId.add(e.id); usedPat[p] = (usedPat[p]||0)+1; added++;
+    }
+    // segunda pasada: si falto, aflojar la regla
+    for(const e of seq){
+      if(added >= n) break;
+      if(usedId.has(e.id)) continue;
+      chosen.push(e); usedId.add(e.id);
+      const p = patternOf(e.name); usedPat[p] = (usedPat[p]||0)+1; added++;
+    }
+  }
+
+  // orden final: compuestos primero, core al final
+  return chosen.sort((a,b)=>{
+    const core = x => x.muscle === 'Core' ? 1 : 0;
+    if(core(a) !== core(b)) return core(a) - core(b);
+    return (isCompound(b.name)?1:0) - (isCompound(a.name)?1:0);
+  });
+}
+
+/* ═══════════════════════════════════════════
    ROUTINES
    ═══════════════════════════════════════════ */
 async function drawRoutines(){
+  EX = await db.exercises.toArray();
   RT = await db.routines.toArray();
   $('#rt-count').textContent = RT.length ? `${RT.length} activas` : '';
   if(!RT.length){
-    $('#rt-list').innerHTML = `<div class="empty"><div class="big">Todavía no hay rutinas</div><p>Una rutina es una lista ordenada de ejercicios. Empezá con Push, Pull o Piernas.</p></div>`;
+    $('#rt-list').innerHTML = `<div class="empty"><div class="big">Todavía no hay rutinas</div><p>Usá "Armar rutina por mí" y elegí qué grupos querés entrenar, o creá una a mano con el botón +.</p></div>`;
     return;
   }
   const rows = await Promise.all(RT.map(async r=>{
@@ -764,6 +926,118 @@ async function drawRoutines(){
       <span class="chev">›</span></button>`;
   }));
   $('#rt-list').innerHTML = rows.join('');
+}
+
+/* ── UI del generador ──────────────────────────────────── */
+let GEN = {groups:[], total:6, goal:'hipertrofia', result:[]};
+
+async function openGen(){
+  EX = await db.exercises.orderBy('name').toArray();
+  if(EX.length < 4){ toast('Cargá más ejercicios primero'); return; }
+  GEN = {groups:[], total:6, goal:'hipertrofia', result:[]};
+  const avail = MUSCLES.filter(m => EX.some(e=>e.muscle===m));
+  sheet(`
+    <h2>Armar rutina</h2>
+    <div class="field"><label>Qué querés entrenar</label>
+      <div class="chips">
+        ${avail.map(m=>`<button type="button" class="chip" data-g="${m}" onclick="toggleG('${m}',this)">${m}</button>`).join('')}
+      </div>
+    </div>
+    <div class="field"><label>Cuántos ejercicios</label>
+      <div class="seg" style="margin:0">
+        <button type="button" id="gn-4" onclick="setN(4)">4</button>
+        <button type="button" id="gn-6" class="on" onclick="setN(6)">6</button>
+        <button type="button" id="gn-8" onclick="setN(8)">8</button>
+      </div>
+      <div style="color:var(--muted);font-size:12px;margin-top:8px" id="gn-hint">Unos 70 min con descansos de 90s.</div>
+    </div>
+    <div class="field"><label>Enfoque</label>
+      <div class="seg" style="margin:0">
+        <button type="button" id="gg-fuerza" onclick="setG('fuerza')">Fuerza</button>
+        <button type="button" id="gg-hipertrofia" class="on" onclick="setG('hipertrofia')">Hipertrofia</button>
+        <button type="button" id="gg-resistencia" onclick="setG('resistencia')">Resistencia</button>
+      </div>
+    </div>
+    <button class="btn primary" onclick="runGen()">Generar</button>
+  `);
+}
+
+function toggleG(m, el){
+  el.classList.toggle('on');
+  GEN.groups = [...document.querySelectorAll('.chip.on')].map(b=>b.dataset.g);
+  hintN();
+}
+function setN(n){
+  GEN.total = n;
+  [4,6,8].forEach(v=>$('#gn-'+v)?.classList.toggle('on', v===n));
+  hintN();
+}
+function setG(g){
+  GEN.goal = g;
+  ['fuerza','hipertrofia','resistencia'].forEach(v=>$('#gg-'+v)?.classList.toggle('on', v===g));
+}
+function hintN(){
+  const el = $('#gn-hint'); if(!el) return;
+  const mins = Math.round(GEN.total * (GEN.goal==='fuerza'?13:11));
+  let t = `Unos ${mins} min con descansos de ${REST_DEFAULT}s.`;
+  if(GEN.groups.length >= 4 && GEN.total <= 6)
+    t += ' Con tantos grupos van a tocar pocos ejercicios por músculo.';
+  if(GEN.groups.length <= 2 && GEN.total >= 8)
+    t += ' Mucho volumen para pocos grupos, ojo con la fatiga.';
+  el.textContent = t;
+}
+
+function runGen(){
+  if(!GEN.groups.length) return toast('Elegí al menos un grupo');
+  GEN.result = pickExercises(EX, GEN.groups, GEN.total, GEN.goal);
+  if(!GEN.result.length) return toast('No hay ejercicios para esos grupos');
+  showGen();
+}
+
+function showGen(){
+  const name = GEN.groups.join(' · ');
+  const mins = Math.round(GEN.result.reduce((a,e)=>
+    a + prescribe(GEN.goal, isCompound(e.name), e.mode).sets * ((REST_DEFAULT+35)/60), 0));
+  sheet(`
+    <h2>Tu rutina</h2>
+    <div class="field"><label>Nombre</label><input id="g-name" value="${esc(name)}"></div>
+    <div style="color:var(--muted);font-size:12px;margin:-6px 0 14px">
+      ${GEN.result.length} ejercicios · ~${mins} min estimados
+    </div>
+    <div class="card" style="padding:0">
+      ${GEN.result.map((e,i)=>{
+        const p = prescribe(GEN.goal, isCompound(e.name), e.mode);
+        return `<div class="pick" style="cursor:default">
+          <div class="grow">
+            <div class="t">${esc(e.name)}</div>
+            <div class="s">${esc(e.muscle)} · ${p.hint}</div>
+          </div>
+          <button class="swap" onclick="swapEx(${i})" title="Cambiar">⟳</button>
+        </div>`;
+      }).join('')}
+    </div>
+    <button class="btn primary mt" onclick="saveGen()">Guardar rutina</button>
+    <button class="btn ghost" style="margin-top:8px" onclick="runGen()">Generar otra</button>
+    <button class="btn ghost" style="margin-top:8px" onclick="openGen()">Cambiar opciones</button>
+  `);
+}
+
+/* cambiar un ejercicio por otro del mismo grupo */
+function swapEx(i){
+  const cur = GEN.result[i];
+  const used = new Set(GEN.result.map(e=>e.id));
+  const alt = EX.filter(e => e.muscle===cur.muscle && !used.has(e.id));
+  if(!alt.length) return toast('No hay otro de ese grupo');
+  GEN.result[i] = alt[Math.floor(Math.random()*alt.length)];
+  showGen();
+}
+
+async function saveGen(){
+  const name = $('#g-name').value.trim();
+  if(!name) return toast('Ponele un nombre');
+  const rid = await db.routines.add({name});
+  await db.routineEx.bulkAdd(GEN.result.map((e,order)=>({routineId:rid, exerciseId:e.id, order})));
+  closeSheet(); drawRoutines(); toast('Rutina guardada');
 }
 
 async function openRoutine(id){
